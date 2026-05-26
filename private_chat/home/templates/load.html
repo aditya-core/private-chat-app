@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+{# Django tip: add {% load static %} here if serving via Django template engine #}
+{# Then you can use: const REDIRECT_URL = "{% url 'your_login_view_name' %}"; #}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>THETA | Classified Channel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+        }
+        #main-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+        }
+        canvas {
+            position: absolute;
+            top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: block;
+        }
+        #bgCanvas     { z-index: 0; }
+        #particleCanvas { z-index: 1; }
+        #terminal {
+            position: absolute;
+            bottom: 12%; left: 50%;
+            transform: translateX(-50%);
+            width: 80%; max-width: 600px;
+            color: rgba(220, 220, 220, 0.95);
+            font-size: 0.85rem;
+            line-height: 1.6;
+            text-align: center;
+            z-index: 2;
+            white-space: pre-wrap;
+            word-break: break-word;
+            text-shadow: 0 0 4px rgba(255, 215, 0, 0.3);
+            pointer-events: none;
+        }
+        body::after {
+            content: "";
+            position: fixed; top: 0; left: 0;
+            width: 100%; height: 100%;
+            background: repeating-linear-gradient(0deg,
+                transparent, transparent 2px,
+                rgba(0,0,0,0.02) 2px, rgba(0,0,0,0.02) 4px);
+            pointer-events: none;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <div id="main-container">
+        <canvas id="bgCanvas"></canvas>
+        <canvas id="particleCanvas"></canvas>
+        <div id="terminal"></div>
+    </div>
+
+    <script>
+    (function () {
+        // ─── CONFIG ──────────────────────────────────────────
+        const LOGO_TEXT      = "THETA";
+        const COLOR_BASE     = "#b0b0b0";
+        const COLOR_FILL     = "#ffd700";
+        const INITIAL_BLACK  = 500;   // reduced from 1000ms so it feels responsive
+        const FORMATION_TIME = 800;
+        const FILL_TIME      = 8000;
+
+        // ─── REDIRECT CONFIG ──────────────────────────────────
+        // Set this to your Django login page URL or template path.
+        // Examples:
+        //   Django named URL:  "/login/"  or  "/accounts/login/"
+        //   Django template:   "{% url 'login' %}"  (if using this as a .html template)
+        //   Relative path:     "../templates/myapp/login.html"
+        const REDIRECT_URL   = "/login/";       // ← CHANGE THIS
+        const REDIRECT_DELAY = 1000;            // ms to wait after animation before redirect
+
+        // ─── GLOBAL ELEMENTS ─────────────────────────────────
+        const bgCanvas      = document.getElementById('bgCanvas');
+        const bgCtx         = bgCanvas.getContext('2d');
+        const particleCanvas = document.getElementById('particleCanvas');
+        const pCtx          = particleCanvas.getContext('2d');
+        const terminalDiv   = document.getElementById('terminal');
+
+        // ─── FIX 1: Persistent offscreen canvas for effects ──
+        // We NEVER draw particleCanvas onto itself; we use this instead.
+        const offCanvas = document.createElement('canvas');
+        const offCtx    = offCanvas.getContext('2d');
+
+        // ─── FIX 2: Check filter support ─────────────────────
+        const supportsFilter = typeof pCtx.filter !== 'undefined';
+
+        let W, H;
+        let particles = [];
+        let animationPhase = 'idle';
+        let formationStart = 0;
+        let fillStart      = 0;
+        let minX, maxX;
+        let textTargetCache = [];
+
+        // ─── RESIZE ───────────────────────────────────────────
+        function resize() {
+            W = window.innerWidth;
+            H = window.innerHeight;
+            bgCanvas.width  = W; bgCanvas.height  = H;
+            particleCanvas.width = W; particleCanvas.height = H;
+            // FIX 3: Also resize the offscreen canvas on resize
+            offCanvas.width = W; offCanvas.height = H;
+            if (textTargetCache.length > 0) computeTargetFromCache();
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // ─── TEXT PIXEL TARGETS ───────────────────────────────
+        function computeTextTargets() {
+            const refW = 800, refH = 300;
+            const oc = document.createElement('canvas');
+            oc.width = refW; oc.height = refH;
+            const octx = oc.getContext('2d');
+            const fontSize = 160;
+            octx.font = `bold ${fontSize}px "Segoe UI", "Arial Black", sans-serif`;
+            octx.fillStyle = '#ffffff';
+            const tw = octx.measureText(LOGO_TEXT).width;
+            const tx = (refW - tw) / 2;
+            const ty = (refH + fontSize * 0.35) / 2;
+            octx.fillText(LOGO_TEXT, tx, ty);
+
+            const data = octx.getImageData(0, 0, refW, refH).data;
+            const step = 2;
+            const raw = [];
+            for (let y = 0; y < refH; y += step)
+                for (let x = 0; x < refW; x += step)
+                    if (data[(y * refW + x) * 4 + 3] > 128)
+                        raw.push({ x, y });
+
+            if (raw.length === 0) {
+                for (let i = 0; i < 300; i++)
+                    raw.push({ x: refW / 2 + (Math.random() - 0.5) * 100,
+                                y: refH / 2 + (Math.random() - 0.5) * 40 });
+            }
+
+            const sx = W / refW, sy = H / refH;
+            const pts = raw.map(p => ({ x: p.x * sx, y: p.y * sy }));
+            pts.sort(() => Math.random() - 0.5);
+            textTargetCache = pts.slice(0, 2500);
+            const xs = textTargetCache.map(p => p.x);
+            minX = Math.min(...xs);
+            maxX = Math.max(...xs);
+        }
+
+        function computeTargetFromCache() {
+            if (textTargetCache.length > 0) {
+                const xs = textTargetCache.map(p => p.x);
+                minX = Math.min(...xs);
+                maxX = Math.max(...xs);
+            }
+        }
+
+        // ─── PARTICLES ────────────────────────────────────────
+        function createParticles() {
+            particles = textTargetCache.map(t => ({
+                x: Math.random() * W,
+                y: Math.random() * H,
+                targetX: t.x, targetY: t.y,
+                color: COLOR_BASE,
+                settled: false,
+                delay: Math.random() * 0.7 * FORMATION_TIME,
+                vx: 0, vy: 0
+            }));
+        }
+
+        function springTowardsTarget(p) {
+            const dx = p.targetX - p.x;
+            const dy = p.targetY - p.y;
+            p.vx = p.vx * 0.75 + dx * 0.1;
+            p.vy = p.vy * 0.75 + dy * 0.1;
+            p.x += p.vx;
+            p.y += p.vy;
+            if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) {
+                p.x = p.targetX; p.y = p.targetY;
+                p.settled = true;
+            }
+        }
+
+        function easeInOutCubic(t) {
+            return t < 0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+        }
+
+        // ─── BACKGROUND ───────────────────────────────────────
+        function drawBackground() {
+            bgCtx.clearRect(0, 0, W, H);
+            bgCtx.fillStyle = 'rgba(255,255,255,0.3)';
+            for (let i = 0; i < 100; i++) {
+                bgCtx.beginPath();
+                bgCtx.arc((i * 137.5) % W, (i * 97.3) % H, 0.8, 0, Math.PI * 2);
+                bgCtx.fill();
+            }
+            bgCtx.font = '10px "Courier New"';
+            bgCtx.fillStyle = 'rgba(0,255,0,0.03)';
+            for (let i = 0; i < 200; i++) {
+                bgCtx.fillText(
+                    String.fromCharCode(0x30A0 + (i % 96)),
+                    (i * 29.7) % W,
+                    (Date.now() * 0.05 + i * 13) % H
+                );
+            }
+        }
+
+        // ─── RENDER PARTICLES (FIXED) ─────────────────────────
+        // FIX: Draw particles onto offCanvas first, then composite
+        // onto particleCanvas. Never draw particleCanvas onto itself.
+        function renderParticles() {
+            // 1. Clear both canvases
+            pCtx.clearRect(0, 0, W, H);
+            offCtx.clearRect(0, 0, W, H);
+
+            if (particles.length === 0) return;
+
+            // 2. Draw particles onto the OFFSCREEN canvas
+            for (const p of particles) {
+                offCtx.fillStyle = p.color;
+                offCtx.beginPath();
+                offCtx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+                offCtx.fill();
+            }
+
+            // 3. Base draw: copy offscreen → particle canvas
+            pCtx.drawImage(offCanvas, 0, 0);
+
+            // 4. Chromatic aberration: shift the OFFSCREEN copy (not self)
+            pCtx.save();
+            pCtx.globalCompositeOperation = 'lighter';
+            pCtx.globalAlpha = 0.5;
+            pCtx.drawImage(offCanvas, -1, 0);  // red shift
+            pCtx.drawImage(offCanvas,  1, 0);  // blue shift
+            pCtx.restore();
+
+            // 5. Glow: blur the OFFSCREEN copy onto particle canvas
+            // FIX: guard with filter support check
+            if (supportsFilter) {
+                pCtx.save();
+                pCtx.globalCompositeOperation = 'screen';
+                pCtx.filter = 'blur(4px)';
+                pCtx.globalAlpha = 0.3;
+                pCtx.drawImage(offCanvas, 0, 0);
+                pCtx.restore();
+                pCtx.filter = 'none'; // explicit reset for safety
+            }
+        }
+
+        // ─── TERMINAL ─────────────────────────────────────────
+        const terminalLines = [
+            "> Initializing secure channel...",
+            "> Downloading encryption protocols...",
+            "> Verifying device fingerprint...",
+            "> Loading THETA kernel modules...",
+            "> Establishing quantum-resistant tunnel...",
+            "> Synchronizing keys...",
+            "> Decrypting configuration...",
+            "> Checking hardware integrity...",
+            "> Mounting classified volume...",
+            "> Securing memory pages...",
+            "> Activating subnet mask...",
+            "> Bypassing lattice filters...",
+            "> All systems nominal.",
+            "> Connection secure."
+        ];
+        let termIndex = 0, termTimer = null;
+
+        function startTerminal() {
+            termIndex = 0;
+            terminalDiv.textContent = '';
+            typeNextLine();
+        }
+        function typeNextLine() {
+            if (termIndex >= terminalLines.length) {
+                terminalDiv.textContent += '\n> LOADING COMPLETE.';
+                return;
+            }
+            const line = terminalLines[termIndex++];
+            terminalDiv.textContent += '\n';
+            typeLine(line, 0);
+        }
+        function typeLine(line, i) {
+            if (i < line.length) {
+                terminalDiv.textContent += line.charAt(i);
+                termTimer = setTimeout(() => typeLine(line, i + 1), 25 + Math.random() * 35);
+            } else {
+                terminalDiv.textContent += ' █';
+                termTimer = setTimeout(() => {
+                    terminalDiv.textContent = terminalDiv.textContent.slice(0, -1);
+                    typeNextLine();
+                }, 350 + Math.random() * 600);
+            }
+        }
+        function stopTerminal() {
+            clearTimeout(termTimer);
+            terminalDiv.textContent += '\n> LOADING COMPLETE.';
+        }
+
+        // ─── MAIN LOOP ────────────────────────────────────────
+        function animationLoop(timestamp) {
+            drawBackground();
+
+            if (animationPhase === 'forming') {
+                const elapsed = timestamp - formationStart;
+                for (const p of particles) {
+                    if (!p.settled && elapsed > p.delay) springTowardsTarget(p);
+                }
+                const allSettled = particles.every(p => p.settled);
+                if (allSettled || elapsed > FORMATION_TIME + 200) {
+                    for (const p of particles) {
+                        p.x = p.targetX; p.y = p.targetY; p.settled = true;
+                    }
+                    animationPhase = 'formed';
+                    startTerminal();
+                    setTimeout(() => {
+                        animationPhase = 'filling';
+                        fillStart = performance.now();
+                    }, 150);
+                }
+            } else if (animationPhase === 'filling') {
+                const elapsed = timestamp - fillStart;
+                const raw = Math.min(1, elapsed / FILL_TIME);
+                const sweepX = minX + (maxX - minX) * easeInOutCubic(raw);
+                for (const p of particles)
+                    p.color = p.targetX <= sweepX ? COLOR_FILL : COLOR_BASE;
+                if (raw >= 1) {
+                    animationPhase = 'done';
+                    stopTerminal();
+                    redirectAfterDelay();
+                }
+            } else if (animationPhase === 'done') {
+                for (const p of particles) p.color = COLOR_FILL;
+            }
+
+            renderParticles();
+
+            if (animationPhase !== 'done') {
+                requestAnimationFrame(animationLoop);
+            }
+        }
+
+        // ─── REDIRECT ─────────────────────────────────────────
+        function redirectAfterDelay() {
+            // Fade the whole screen to black, then navigate
+            const fade = document.createElement('div');
+            fade.style.cssText = `
+                position: fixed; inset: 0; z-index: 999;
+                background: #000; opacity: 0;
+                transition: opacity ${REDIRECT_DELAY}ms ease-in;
+                pointer-events: none;
+            `;
+            document.body.appendChild(fade);
+
+            // Trigger reflow so the transition fires
+            void fade.offsetWidth;
+            fade.style.opacity = '1';
+
+            setTimeout(() => {
+                window.location.href = REDIRECT_URL;
+            }, REDIRECT_DELAY);
+        }
+
+        // ─── BOOT ─────────────────────────────────────────────
+        function boot() {
+            setTimeout(() => {
+                computeTextTargets();
+                createParticles();
+                animationPhase = 'forming';
+                formationStart = performance.now();
+                requestAnimationFrame(animationLoop);
+            }, INITIAL_BLACK);
+        }
+
+        window.addEventListener('load', () => { resize(); boot(); });
+    })();
+    </script>
+</body>
+</html>
